@@ -1,9 +1,9 @@
-#updated
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
 import yt_dlp
 import uuid
 import os
+import shutil
 
 app = FastAPI()
 
@@ -12,11 +12,11 @@ DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 @app.get("/")
-def root():
-    return {"status": "online", "message": "YouTube MP3 Proxy is running!"}
+async def root():
+    return {"status": "online", "message": "YouTube MP3 Proxy is running!", "endpoints": ["/download"]}
 
 @app.get("/download")
-def download_audio(url: str = Query(..., description="YouTube video URL")):
+async def download_audio(url: str = Query(..., description="YouTube video URL")):
     """
     Download audio from a YouTube URL and return the MP3 file.
     Example: /download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ
@@ -69,5 +69,9 @@ def download_audio(url: str = Query(..., description="YouTube video URL")):
         )
 
 @app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+async def health_check():
+    return {"status": "healthy", "download_dir": DOWNLOAD_DIR}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
