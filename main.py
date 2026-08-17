@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import shutil
+import sys
 
 app = FastAPI()
 
@@ -13,12 +14,21 @@ app = FastAPI()
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# Check if ffmpeg is available
+def check_ffmpeg():
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        return True
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return False
+
 @app.get("/")
 async def root():
     return {
         "status": "online",
         "message": "YouTube MP3 Proxy is running!",
-        "endpoints": ["/download"]
+        "endpoints": ["/download"],
+        "ffmpeg_available": check_ffmpeg()
     }
 
 @app.get("/download")
@@ -33,76 +43,87 @@ async def download_audio(url: str = Query(..., description="YouTube video URL"))
         file_id = str(uuid.uuid4())
         output_path = os.path.join(temp_dir, file_id)
 
-        # Use yt-dlp with explicit configuration to avoid the _http_error issue
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'outtmpl': output_path,
-            'quiet': True,
-            'no_warnings': True,
-            'extract_audio': True,
-            'audioformat': 'mp3',
-            'ignoreerrors': True,
-            'no_check_certificate': True,
-            'prefer_ffmpeg': True,
-        }
-
-        # Try using yt-dlp
-        try:
+        # Check if ffmpeg is available
+        has_ffmpeg = check_ffmpeg()
+        
+        if not has_ffmpeg:
+            # Try to use the built-in audio extraction without ffmpeg
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': output_path,
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': True,
+                'no_check_certificate': True,
+            }
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
-        except Exception as e:
-            # If yt-dlp fails, try using subprocess to call yt-dlp directly
-            print(f"yt-dlp library failed: {e}, trying subprocess...")
-            subprocess.run([
-                'yt-dlp',
-                '-f', 'bestaudio/best',
-                '--extract-audio',
-                '--audio-format', 'mp3',
-                '--audio-quality', '192K',
-                '--output', output_path,
-                url
-            ], check=True)
-
-        # Find the generated MP3 file
-        mp3_file = None
-        for f in os.listdir(temp_dir):
-            if f.startswith(file_id) and f.endswith('.mp3'):
-                mp3_file = os.path.join(temp_dir, f)
-                break
-
-        if not mp3_file:
-            # Try to find any mp3 file in the temp directory
+                
+            # Try to find the downloaded file (might be webm or m4a)
+            downloaded_file = None
             for f in os.listdir(temp_dir):
-                if f.endswith('.mp3'):
+                if f.startswith(file_id):
+                    downloaded_file = os.path.join(temp_dir, f)
+                    break
+                    
+            if downloaded_file:
+                # Return whatever was downloaded
+                with open(downloaded_file, 'rb') as f:
+                    file_data = f.read()
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return StreamingResponse(
+                    iter([file_data]),
+                    media_type='audio/mpeg',
+                    headers={
+                        'Content-Disposition': f'attachment; filename="{file_id}.mp3"',
+                        'Content-Length': str(len(file_data))
+                    }
+                )
+        else:
+            # Full ffmpeg-powered download
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'outtmpl': output_path,
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': True,
+                'no_check_certificate': True,
+                'prefer_ffmpeg': True,
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            # Find the generated MP3 file
+            mp3_file = None
+            for f in os.listdir(temp_dir):
+                if f.startswith(file_id) and f.endswith('.mp3'):
                     mp3_file = os.path.join(temp_dir, f)
                     break
 
-        if not mp3_file:
-            return JSONResponse(
-                status_code=404,
-                content={"error": "Could not find downloaded file"}
-            )
+            if mp3_file:
+                with open(mp3_file, 'rb') as f:
+                    file_data = f.read()
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return StreamingResponse(
+                    iter([file_data]),
+                    media_type='audio/mpeg',
+                    headers={
+                        'Content-Disposition': f'attachment; filename="{file_id}.mp3"',
+                        'Content-Length': str(len(file_data))
+                    }
+                )
 
-        # Read the file and return it
-        with open(mp3_file, 'rb') as f:
-            file_data = f.read()
-
-        # Clean up the temp directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-        # Return the file
-        return StreamingResponse(
-            iter([file_data]),
-            media_type='audio/mpeg',
-            headers={
-                'Content-Disposition': f'attachment; filename="{file_id}.mp3"',
-                'Content-Length': str(len(file_data))
-            }
+        # If we get here, no file was found
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Could not find downloaded file"}
         )
 
     except Exception as e:
@@ -113,7 +134,10 @@ async def download_audio(url: str = Query(..., description="YouTube video URL"))
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "download_dir": DOWNLOAD_DIR}
+    return {
+        "status": "healthy",
+        "ffmpeg_available": check_ffmpeg()
+    }
 
 if __name__ == "__main__":
     import uvicorn
